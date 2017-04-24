@@ -1,0 +1,235 @@
+<?php
+
+/*
+ * Implements hook_menu().
+ *
+ * Defines path to treat custom ajax-requests from pages.
+ */
+function ajaxpage_menu() {
+  $items = array();
+  $items['ajaxpage/%/node/%node'] = array(
+    'title' => 'Treat ajax actions on pages',
+    'description' => t('Path to treat custom ajax-requests from pages.'),
+    'page callback' => 'ajaxpage_execute_action',
+    'page arguments' => array(1, 2, 3),
+    'access arguments' => array('access content'),
+    'file' => 'ajaxpage.actions.inc',
+  );
+  $items['ajaxpage/%/comment/%comment'] = array(
+    'title' => 'Treat ajax actions on comments',
+    'description' => t('Path to treat custom ajax-requests to operate with comments.'),
+    'page callback' => 'ajaxpage_execute_action',
+    'page arguments' => array(1, 2, 3),
+    'access arguments' => array('access content'),
+    'file' => 'ajaxpage.actions.inc',
+  );
+  $items['ajaxpage/%'] = array(
+    'title' => 'Treat simple ajaxpage actions',
+    'description' => t('Path to treat simple ajaxpage actions.'),
+    'page callback' => 'ajaxpage_execute_action',
+    'page arguments' => array(1),
+    'access arguments' => array('access content'),
+    'file' => 'ajaxpage.actions.inc',
+  );
+  return $items;
+}
+
+/*
+ * Implements hook_theme().
+ *
+ * Register module theme function.
+ */
+function ajaxpage_theme() {
+  return array(
+    'ajaxpage_actions_menu' => array(
+      'variables' => array(
+        'nid' => null,
+        'actions' => null
+      ),
+      'file' => 'ajaxpage.theme.inc',
+    ),
+  );
+}
+
+/**
+ * Implements hook_views_api().
+ */
+function ajaxpage_views_api() {
+  return array(
+    'api' => 3,
+    'path' => drupal_get_path('module', 'ajaxpage'),
+  );
+}
+
+/*
+ * Override template_preprocess_views_view_fields.
+ *
+ * Adds ajaxPage.js to the corresponding views.
+ */
+function ajaxpage_preprocess_views_view(&$vars) {
+
+  // View with AjaxPage actions menu.
+  if (isset($vars['view']->field['ajaxpage_actions_menu'])) {
+
+    // If view is not empty
+    if (!empty($vars['view']->result)) {
+
+      // Attach javascripts to the view.
+      drupal_add_library('system', 'drupal.ajax');
+      drupal_add_js(drupal_get_path('module', 'ajaxpage') . '/js/ajaxPage.js', array('scope' => 'footer'));
+    }
+  }
+}
+
+/**
+ * Implements hook_permission().
+ */
+function ajaxpage_permission() {
+  return array(
+    'delete comments on own nodes' => array(
+      'title' => t('Delete comments on own nodes'),
+      'description' => t('Allows a user to delete comments with no replies on own nodes.'),
+    ),
+  );
+}
+
+/**
+ * Access callback for deleting comments on own nodes.
+ */
+function ajaxpage_delete_comment_access($comment) {
+
+  global $user;
+
+  // Author uid for the node to which comment is related
+  $node_uid = db_select('node', 'n')
+    ->fields('n', array('uid'))
+    ->condition('nid', $comment->nid)
+    ->execute()->fetchField();
+
+  $access = ($user->uid && (user_access('delete comments on own nodes') || user_access('administer comments')) && ($user->uid == $comment->uid || $user->uid == $node_uid));
+
+  // Deletion is not allowed if any comment has this comment as a parent.
+  return $access && (0 == db_query("SELECT COUNT(cid) FROM {comment} WHERE pid = :cid", array(':cid' => $comment->cid))->fetchField());
+}
+
+/**
+ * Implements hook_comment_view().
+ */
+function ajaxpage_comment_view($comment, $view_mode, $langcode) {
+
+  // Get array of comment actions.
+  $actions = ajaxpage_get_comment_actions();
+
+  // No actions. Exit.
+  if (empty($actions)) return;
+
+  // Add CSS id to comment ajaxpage links.
+  $comment->content['links']['#attributes']['id'] = 'ajaxpage-comment-' . $comment->cid;
+
+  // Loop through comment actions.
+  foreach ($actions as $action => $data) {
+
+    // Skip links which user doesn't have access to.
+    if (isset($data['access']) && !call_user_func($data['access'], $comment)) continue;
+
+    // Add link to comment links.
+    $path = '/ajaxpage/' . $action . '/comment/' . $comment->cid;
+    $comment_links = &$comment->content['links']['comment']['#links'];
+    $comment_links['ajaxpage-' . $action] = array(
+      'title' => $data['text'],
+      'href' => $path,
+      'query' => array('token' => drupal_get_token($path)),
+      'attributes' => array(
+        'class' => 'ajaxpage__ajax',
+        'title' => $data['title']
+      ),
+      'html' => TRUE,
+    );
+
+    // Add confirmation step.
+    if (isset($data['confirm'])) {
+      $comment_links['ajaxpage-' . $action]['attributes']['data-confirm'] = $data['confirm'];
+    }
+  }
+
+  // Attach javascripts to the view.
+  drupal_add_library('system', 'drupal.ajax');
+  drupal_add_js(drupal_get_path('module', 'ajaxpage') . '/js/ajaxPage.js', array('scope' => 'footer'));
+}
+
+/*
+ * Prepare array of comment actions.
+ */
+function ajaxpage_get_comment_actions() {
+
+  // Default actions array
+  $actions = array();
+  $actions['delete'] = array(
+    'text' => t('Delete'),
+    'title' => t('Delete comment'),
+    'confirm' => t('Delete comment?'),
+    'access' => 'ajaxpage_delete_comment_access',
+  );
+
+  // Alter actions array from other modules
+  drupal_alter('ajaxpage_comment_actions', $actions);
+
+  return $actions;
+}
+
+/*
+ * Prepare array of actions permissible for the current user and node.
+ */
+function ajaxpage_get_node_actions($node) {
+
+  // User object is required to check access permissions
+  global $user;
+
+  // Default actions array
+  $actions = array();
+  $actions['edit'] = array(
+    'text' => t('Edit'),
+    'title' => t('Edit node'),
+    'link' => '/node/' . $node->nid . '/edit',
+    'destination' => TRUE,
+    'node_access_op' => 'update'
+  );
+  $actions['publish'] = array(
+    'text' => $node->status == 0 ? t('Publish') : t('Unpublish'),
+    'title' => $node->status == 0 ? t('Publish node') : t('Unpublish node'),
+    'node_access_op' => 'update'
+  );
+  $actions['delete'] = array(
+    'text' => t('Delete'),
+    'title' => t('Delete node'),
+    'confirm' => t('Delete node?'),
+    'node_access_op' => 'delete'
+  );
+  $actions['load_comments'] = array(
+    'text' => t('Load comments'),
+    'title' => t('Load all node comments'),
+    'menu_skip' => TRUE,
+  );
+
+  // Alter actions array from other modules
+  drupal_alter('ajaxpage_' . $node->type . '_actions', $actions, $node);
+
+  // Remove actions user doesn't have access to
+  foreach ($actions as $action_name => $action_data) {
+    if (isset($action_data['node_access_op'])) {
+
+      // node_access checks user access for operation with node or node type.
+      if (isset($action_data['node_access_node'])) {
+        $node_access_node = $action_data['node_access_node'];
+      } else {
+        $node_access_node = $action_data['node_access_op'] == 'create' ? $node->type : $node;
+      }
+
+      if (!node_access($action_data['node_access_op'], $node_access_node, $user)) {
+        unset($actions[$action_name]);
+      }
+    }
+  }
+
+  return $actions;
+}

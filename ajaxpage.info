@@ -1,0 +1,6 @@
+name = AjaxPage
+description = Handles ajax actions on pages.
+core = 7.x
+package = up2top.ru
+dependencies[] = views
+files[] = ajaxpage_handler_actions_menu.inc
